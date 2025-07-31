@@ -188,7 +188,7 @@
 </body>
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     let app;
@@ -746,40 +746,32 @@
 
     async function init() {
         // Initialize Firebase and Authentication
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        // This is a dummy config for a live deployment where the Canvas variables are not present.
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_AUTH_DOMAIN",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
         app = initializeApp(firebaseConfig);
         db = getFirestore(app);
         auth = getAuth(app);
 
-        // Sign in anonymously if no user is authenticated
-        const authStatePromise = new Promise(resolve => {
-            onAuthStateChanged(auth, async (user) => {
-                if (!user) {
-                    try {
-                        if (typeof __initial_auth_token !== 'undefined') {
-                            const userCredential = await signInWithCustomToken(auth, __initial_auth_token);
-                            userId = userCredential.user.uid;
-                        } else {
-                            const userCredential = await signInAnonymously(auth);
-                            userId = userCredential.user.uid;
-                        }
-                    } catch (error) {
-                        console.error("Authentication failed:", error);
-                        userId = auth.currentUser?.uid || crypto.randomUUID();
-                    }
-                } else {
-                    userId = user.uid;
-                }
-                const userIdDisplay = document.getElementById('user-id-display');
-                if (userIdDisplay) {
-                    userIdDisplay.textContent = `User ID: ${userId}`;
-                }
-                resolve();
-            });
-        });
+        // Sign in anonymously to get a userId immediately
+        try {
+            await signInAnonymously(auth);
+            userId = auth.currentUser.uid;
+        } catch (error) {
+            console.error("Anonymous authentication failed, using a random user ID.", error);
+            userId = crypto.randomUUID();
+        }
         
-        await authStatePromise;
+        const userIdDisplay = document.getElementById('user-id-display');
+        if (userIdDisplay) {
+            userIdDisplay.textContent = `User ID: ${userId}`;
+        }
 
         // All subsequent UI and data-related functions are called after auth is ready
         setupCalendar();
