@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Warrior's Path: Daily Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let selectedDate = new Date();
+
+        // Array of Bhagavad Gita verses relevant to discipline, duty, and courage
+        const bhagavadGitaQuotes = [
+            {
+                text: "कर्मण्येवाधिकारस्ते मा फलेषु कदाचन। मा कर्मफलहेतुर्भूर्मा ते सङ्गोऽस्त्वकर्मणि॥",
+                meaning: "You have a right to perform your prescribed duties, but you are not entitled to the fruits of your actions. Never consider yourself the cause of the results of your activities, nor should you be attached to not performing your duty.",
+                source: "Bhagavad Gita, Chapter 2, Verse 47"
+            },
+            {
+                text: "नैनं छिन्दन्ति शस्त्राणि नैनं दहति पावकः। न चैनं क्लेदयन्त्यापो न शोषयति मारुतः॥",
+                meaning: "The soul cannot be pierced by weapons, nor burned by fire; water cannot wet it, nor can the wind wither it. (A reminder of courage and the eternal self).",
+                source: "Bhagavad Gita, Chapter 2, Verse 23"
+            },
+            {
+                text: "युक्ताहारविहारस्य युक्तचेष्टस्य कर्मसु। युक्तस्वप्नावबोधस्य योगो भवति दुःखहा॥",
+                meaning: "Yoga (disciplined practice) is the destroyer of sorrow for one who is moderate in eating and recreation, who is regulated in their actions, and who is balanced in sleep and wakefulness.",
+                source: "Bhagavad Gita, Chapter 6, Verse 17"
+            },
+            {
+                text: "तस्माद्सक्तः सततं कार्यं कर्म समाचर। असक्तो ह्याचरन्कर्म परमाप्नोति पूरुषः॥",
+                meaning: "Therefore, without attachment, constantly perform your duty, for by doing work without attachment, one attains the Supreme.",
+                source: "Bhagavad Gita, Chapter 3, Verse 19"
+            }
+        ];
+
+        // Define hardcoded shloka and its meaning (this will now be dynamically selected from the array)
+        let dailyShloka = bhagavadGitaQuotes[Math.floor(new Date().getDate() % bhagavadGitaQuotes.length)];
+        
+        const workoutPlanTemplate = {
+            "Monday": {
+                title: "Endurance Running",
+                tasks: [
+                    "5 min warm-up",
+                    "km jogging", // Placeholder for dynamic distance
+                    "Fat loss exercises"
+                ]
+            },
+            "Tuesday": {
+                title: "Bodyweight Strength",
+                tasks: [
+                    "5 min light jogging",
+                    "3x max push-ups",
+                    "3x20 squats",
+                    "3x60s plank",
+                    "3x20 crunches"
+                ]
+            },
+            "Wednesday": {
+                title: "Active Recovery",
+                tasks: [
+                    "30-40 min brisk walk or yoga"
+                ]
+            },
+            "Thursday": {
+                title: "Interval & Speed",
+                tasks: [
+                    "5 min warm-up",
+                    "8-10x 30s sprints with 90s rest",
+                    "Agility drills"
+                ]
+            },
+            "Friday": {
+                title: "Full Body Strength",
+                tasks: [
+                    "5 min light jogging",
+                    "Repeat Tuesday's circuit, add reps"
+                ]
+            },
+            "Saturday": {
+                title: "Long Endurance",
+                tasks: [
+                    "5 min warm-up",
+                    "Longer run or ruck march"
+                ]
+            },
+            "Sunday": {
+                tasks: [
+                    "No strenuous activity"
+                ]
+            }
+        };
+
+        const chartColors = {
+            running: '#5A67D8',
+            runningTime: '#F6AD55',
+            completed: '#38A169',
+            todo: '#F6AD55',
+            todoCompleted: '#4A5568'
+        };
+
+        let runningChart, todoChart;
+
+        // Function to dynamically generate workout tasks based on the date
+        function getWorkoutTasks(date) {
+            const dayName = date.toLocaleDateString('en-US', { weekday: 'long' });
+            const plan = JSON.parse(JSON.stringify(workoutPlanTemplate[dayName])); // Deep copy
+            plan.title = plan.title || dayName;
+
+            // Add 2km jogging and meditation to all days
+            let joggingTaskAdded = false;
+            let meditationTaskAdded = false;
+
+            for (let i = 0; i < plan.tasks.length; i++) {
+                if (plan.tasks[i].includes("jogging") || plan.tasks[i].includes("run")) {
+                    plan.tasks[i] = "2km jogging";
+                    joggingTaskAdded = true;
+                }
+                if (plan.tasks[i].includes("Meditation")) {
+                    meditationTaskAdded = true;
+                }
+            }
+
+            if (!joggingTaskAdded) {
+                plan.tasks.splice(1, 0, "2km jogging"); // Add after warm-up
+            }
+            if (!meditationTaskAdded) {
+                plan.tasks.push("Meditation");
+            }
+
+            return plan;
+        }
+
+        async function updateUIWithData(data) {
+            const todayWorkoutEl = document.getElementById('today-workout-plan');
+            const todayTodoEl = document.getElementById('today-todo-list');
+            const goalDisplayEl = document.getElementById('goal-display');
+            const streakCounterEl = document.getElementById('streak-counter');
+
+            // Update Goal
+            goalDisplayEl.textContent = data?.goal || "No long-term goal set yet.";
+
+            // Update Streak
+            await updateStreakDisplay(streakCounterEl);
+
+            // Get dynamically generated workout plan
+            const plan = getWorkoutTasks(selectedDate);
+            
+            todayWorkoutEl.innerHTML = `
+                <h3 class="text-xl font-semibold mb-2">${plan.title}</h3>
+                <ul class="space-y-2">
+                    ${plan.tasks.map((task, index) => {
+                        const isCompleted = data?.completedWorkouts?.includes(task) || false;
+                        return `
+                            <li class="flex items-center space-x-2">
+                                <input type="checkbox" id="workout-task-${index}" class="form-checkbox h-5 w-5 text-green-600 rounded" ${isCompleted ? 'checked' : ''} onchange="updateWorkoutStatus('${task}', this.checked)">
+                                <label for="workout-task-${index}" class="${isCompleted ? 'line-through text-gray-500' : 'text-gray-800'}">${task}</label>
+                            </li>
+                        `;
+                    }).join('')}
+                </ul>
+            `;
+
+            todayTodoEl.innerHTML = `
+                ${(data?.todoList || []).map((todo, index) => {
+                    const isCompleted = todo.completed || false;
+                    return `
+                        <li class="flex items-center justify-between space-x-2">
+                            <div class="flex items-center space-x-2">
+                                <input type="checkbox" id="todo-task-${index}" class="form-checkbox h-5 w-5 text-green-600 rounded" ${isCompleted ? 'checked' : ''} onchange="updateTodoStatus('${todo.id}', this.checked)">
+                                <label for="todo-task-${index}" class="${isCompleted ? 'line-through text-gray-500' : 'text-gray-800'}">${todo.text}</label>
+                            </div>
+                            <button onclick="deleteTodoItem('${todo.id}')" class="p-1 rounded-full text-red-500 hover:bg-red-100 transition">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                    <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                                </svg>
+                            </button>
+                        </li>
+                    `;
+                }).join('')}
+            `;
+        }
+
+        async function saveData(date, data) {
+            if (!userId) return;
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, date);
+            try {
+                await setDoc(docRef, data, { merge: true });
+            } catch (error) {
+                console.error("Error writing document: ", error);
+            }
+            // Check for streak completion after any data save
+            await checkAndIncrementStreak();
+        }
+        
+        window.updateWorkoutStatus = async function(task, isCompleted) {
+            if (!userId) return;
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            let data = docSnap.exists() ? docSnap.data() : { completedWorkouts: [] };
+            let completedWorkouts = data.completedWorkouts;
+
+            if (isCompleted) {
+                if (!completedWorkouts.includes(task)) {
+                    completedWorkouts.push(task);
+                }
+            } else {
+                completedWorkouts = completedWorkouts.filter(item => item !== task);
+            }
+            await saveData(dateStr, { completedWorkouts: completedWorkouts });
+        };
+        
+        window.updateTodoStatus = async function(todoId, isCompleted) {
+            if (!userId) return;
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                let todoList = docSnap.data().todoList;
+                const todoIndex = todoList.findIndex(todo => todo.id === todoId);
+                if (todoIndex > -1) {
+                    todoList[todoIndex].completed = isCompleted;
+                    await saveData(dateStr, { todoList: todoList });
+                }
+            }
+            await fetchChartData(56); // Re-fetch data and update charts
+        };
+
+        window.addTodoItem = async function() {
+            const todoInput = document.getElementById('new-todo-input');
+            const todoText = todoInput.value.trim();
+            if (!todoText || !userId) return;
+
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            let data = docSnap.exists() ? docSnap.data() : { todoList: [] };
+            let todoList = data.todoList;
+            
+            todoList.push({ id: crypto.randomUUID(), text: todoText, completed: false });
+            await saveData(dateStr, { todoList: todoList });
+            todoInput.value = '';
+            await fetchChartData(56); // Re-fetch data and update charts
+        };
+
+        window.deleteTodoItem = async function(todoId) {
+            if (!userId) return;
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                let todoList = docSnap.data().todoList;
+                todoList = todoList.filter(todo => todo.id !== todoId);
+                await saveData(dateStr, { todoList: todoList });
+            }
+            await fetchChartData(56); // Re-fetch data and update charts
+        };
+
+        window.addManualRun = async function() {
+            const runInput = document.getElementById('manual-run-input');
+            const timeInput = document.getElementById('manual-time-input');
+            const runDistance = parseFloat(runInput.value);
+            const runTime = parseFloat(timeInput.value);
+
+            if ((isNaN(runDistance) || runDistance <= 0) && (isNaN(runTime) || runTime <= 0)) {
+                // You could add a custom alert or modal here instead of this console log
+                console.error("Please enter a valid positive number for run distance or time.");
+                return;
+            }
+
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            let data = docSnap.exists() ? docSnap.data() : { completedWorkouts: [], runTimeInMinutes: 0, runDistanceInKm: 0 };
+            
+            let completedWorkouts = data.completedWorkouts || [];
+            
+            // Remove any existing running task
+            completedWorkouts = completedWorkouts.filter(task => !task.includes('km jogging'));
+
+            // Add the new manual running task
+            const newRunTask = `${runDistance || 0}km jogging`;
+            completedWorkouts.push(newRunTask);
+            
+            const newRunData = {
+                completedWorkouts: completedWorkouts,
+                runDistanceInKm: runDistance || 0,
+                runTimeInMinutes: runTime || 0
+            };
+
+            await saveData(dateStr, newRunData);
+            runInput.value = '';
+            timeInput.value = '';
+            await fetchChartData(56); // Re-fetch data and update charts
+        };
+
+        window.deleteLastRun = async function() {
+            if (!userId) return;
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                let data = docSnap.data();
+                if (data.completedWorkouts) {
+                    // Filter out any running tasks and reset run metrics
+                    data.completedWorkouts = data.completedWorkouts.filter(task => !task.includes('km jogging'));
+                    const newData = {
+                        completedWorkouts: data.completedWorkouts,
+                        runDistanceInKm: 0,
+                        runTimeInMinutes: 0
+                    };
+                    await saveData(dateStr, newData);
+                }
+            }
+            await fetchChartData(56); // Re-fetch data and update charts
+        };
+
+        window.setLongTermGoal = async function() {
+            const goalInput = document.getElementById('goal-input');
+            const goalText = goalInput.value.trim();
+            if (!goalText || !userId) return;
+
+            const userDocRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/userProfile/goals`);
+            await setDoc(userDocRef, { goal: goalText });
+            goalInput.value = '';
+        };
+
+        async function fetchChartData(daysToFetch) {
+            if (!userId) return;
+            const today = new Date();
+            const dateFrom = new Date(today.getTime() - (daysToFetch * 24 * 60 * 60 * 1000));
+            const dailyCollectionRef = collection(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`);
+            
+            const q = query(dailyCollectionRef);
+            const querySnapshot = await getDocs(q);
+
+            const runningTotals = {};
+            const runningTimeTotals = {};
+            const totalTodoTotals = {};
+            const completedTodoTotals = {};
+            
+            querySnapshot.forEach(doc => {
+                const date = new Date(doc.id);
+                if (date >= dateFrom) {
+                    const week = Math.floor((date.getTime() - dateFrom.getTime()) / (7 * 24 * 60 * 60 * 1000));
+                    const weekKey = `Week ${week + 1}`;
+                    const dailyData = doc.data();
+
+                    if (!runningTotals[weekKey]) runningTotals[weekKey] = 0;
+                    if (!runningTimeTotals[weekKey]) runningTimeTotals[weekKey] = 0;
+                    if (!totalTodoTotals[weekKey]) totalTodoTotals[weekKey] = 0;
+                    if (!completedTodoTotals[weekKey]) completedTodoTotals[weekKey] = 0;
+
+                    if (dailyData.runDistanceInKm) {
+                        runningTotals[weekKey] += dailyData.runDistanceInKm;
+                    }
+                    if (dailyData.runTimeInMinutes) {
+                        runningTimeTotals[weekKey] += dailyData.runTimeInMinutes;
+                    }
+                    if(dailyData.todoList) {
+                        totalTodoTotals[weekKey] += dailyData.todoList.length;
+                        const completedTodos = dailyData.todoList.filter(todo => todo.completed).length;
+                        completedTodoTotals[weekKey] += completedTodos;
+                    }
+                }
+            });
+
+            const weeks = Array.from({ length: daysToFetch / 7 }, (_, i) => `Week ${i + 1}`);
+            const runningData = weeks.map(week => runningTotals[week] || 0);
+            const runningTimeData = weeks.map(week => runningTimeTotals[week] || 0);
+            const totalTodoData = weeks.map(week => totalTodoTotals[week] || 0);
+            const completedTodoData = weeks.map(week => completedTodoTotals[week] || 0);
+
+            if (runningChart) runningChart.destroy();
+            runningChart = new Chart(document.getElementById('runningChart').getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: weeks,
+                    datasets: [
+                        {
+                            label: 'Total Distance (km)',
+                            data: runningData,
+                            borderColor: chartColors.running,
+                            backgroundColor: 'rgba(90, 103, 216, 0.2)',
+                            fill: false, tension: 0.4
+                        },
+                        {
+                            label: 'Total Time (min)',
+                            data: runningTimeData,
+                            borderColor: chartColors.runningTime,
+                            backgroundColor: 'rgba(246, 173, 85, 0.2)',
+                            fill: false, tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false, 
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: { 
+                        y: { 
+                            beginAtZero: true, 
+                            title: { display: true, text: 'Distance (km)' },
+                            position: 'left'
+                        },
+                        y1: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'Time (min)' },
+                            position: 'right',
+                            grid: {
+                                drawOnChartArea: false
+                            }
+                        }
+                    } 
+                }
+            });
+
+            if (todoChart) todoChart.destroy();
+            todoChart = new Chart(document.getElementById('todoChart').getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: weeks,
+                    datasets: [{
+                        label: 'Total To-Do Tasks',
+                        data: totalTodoData,
+                        backgroundColor: chartColors.todo
+                    },
+                    {
+                        label: 'Completed To-Do Tasks',
+                        data: completedTodoData,
+                        backgroundColor: chartColors.todoCompleted
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false, 
+                    scales: { 
+                        x: { stacked: true },
+                        y: { 
+                            stacked: true, 
+                            beginAtZero: true, 
+                            title: { display: true, text: 'Tasks' } 
+                        } 
+                    } 
+                }
+            });
+        }
+
+        async function checkAndIncrementStreak() {
+            if (!userId) return;
+
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const dailyDocRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            const dailyDocSnap = await getDoc(dailyDocRef);
+            const dailyData = dailyDocSnap.exists() ? dailyDocSnap.data() : { completedWorkouts: [], todoList: [] };
+
+            const allWorkouts = getWorkoutTasks(selectedDate).tasks;
+            const workoutsCompleted = allWorkouts.every(task => dailyData.completedWorkouts?.includes(task));
+            const allTodosCompleted = dailyData.todoList?.every(todo => todo.completed) || dailyData.todoList?.length === 0;
+
+            const streakDocRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/userProfile/streak`);
+            const streakDocSnap = await getDoc(streakDocRef);
+            let streakData = streakDocSnap.exists() ? streakDocSnap.data() : { currentStreak: 0, lastCompletionDate: null };
+            
+            if (workoutsCompleted && allTodosCompleted) {
+                const todayStr = new Date().toISOString().split('T')[0];
+                const lastCompletionDate = streakData.lastCompletionDate;
+                let newStreak = streakData.currentStreak;
+
+                if (lastCompletionDate === null) {
+                    newStreak = 1;
+                } else {
+                    const lastDate = new Date(lastCompletionDate);
+                    const diffTime = Math.abs(selectedDate.getTime() - lastDate.getTime());
+                    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                    
+                    if (diffDays === 1) { // Consecutive day
+                        newStreak += 1;
+                    } else if (diffDays > 1) { // Streak broken
+                        newStreak = 1;
+                    }
+                }
+                await setDoc(streakDocRef, { currentStreak: newStreak, lastCompletionDate: todayStr });
+            }
+            await updateStreakDisplay(document.getElementById('streak-counter'));
+        }
+
+        async function updateStreakDisplay(element) {
+            if (!userId) return;
+            const streakDocRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/userProfile/streak`);
+            const streakDocSnap = await getDoc(streakDocRef);
+            const streakData = streakDocSnap.exists() ? streakDocSnap.data() : { currentStreak: 0 };
+            element.textContent = `${streakData.currentStreak || 0} days`;
+        }
+
+        function showShlokaPopup() {
+            const popup = document.getElementById('shloka-popup');
+            const popupText = document.getElementById('shloka-text');
+            const popupMeaning = document.getElementById('shloka-meaning');
+            const popupSource = document.getElementById('shloka-source');
+            popupText.textContent = dailyShloka.text;
+            popupMeaning.textContent = dailyShloka.meaning;
+            popupSource.textContent = dailyShloka.source;
+            popup.classList.remove('hidden');
+        }
+
+        window.closeShlokaPopup = async function() {
+            const popup = document.getElementById('shloka-popup');
+            popup.classList.add('hidden');
+            const dateStr = new Date().toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            await setDoc(docRef, { shlokaShown: true }, { merge: true });
+        };
+        
+        function setupCalendar() {
+            const calendarEl = document.getElementById('calendar-days');
+            const dateHeaderEl = document.getElementById('current-date');
+            const today = new Date();
+            const startOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1);
+            const endOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0);
+            dateHeaderEl.textContent = selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+            
+            calendarEl.innerHTML = '';
+            const firstDayOfWeek = startOfMonth.getDay(); // 0 is Sunday
+            const daysInMonth = endOfMonth.getDate();
+
+            for (let i = 0; i < firstDayOfWeek; i++) {
+                const emptyDay = document.createElement('div');
+                calendarEl.appendChild(emptyDay);
+            }
+
+            for (let i = 1; i <= daysInMonth; i++) {
+                const dayEl = document.createElement('div');
+                dayEl.textContent = i;
+                dayEl.className = 'p-2 text-center cursor-pointer hover:bg-slate-200 rounded transition';
+                const currentDay = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), i);
+                
+                // Highlight today's date with a darker green for better visibility
+                if (currentDay.toISOString().split('T')[0] === today.toISOString().split('T')[0]) {
+                    dayEl.classList.add('bg-green-400', 'text-white', 'font-bold');
+                }
+                
+                // Highlight the selected date with a slate color, unless it's also today
+                if (currentDay.toISOString().split('T')[0] === selectedDate.toISOString().split('T')[0] && currentDay.toISOString().split('T')[0] !== today.toISOString().split('T')[0]) {
+                    dayEl.classList.add('bg-slate-400', 'text-white', 'font-bold');
+                }
+                dayEl.addEventListener('click', () => {
+                    selectedDate = currentDay;
+                    setupCalendar();
+                    loadDataForSelectedDate();
+                });
+                calendarEl.appendChild(dayEl);
+            }
+        }
+        
+        function loadDataForSelectedDate() {
+            if (!userId) return;
+            const dateStr = selectedDate.toISOString().split('T')[0];
+            const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+            
+            onSnapshot(docRef, (doc) => {
+                if (doc.exists()) {
+                    updateUIWithData(doc.data());
+                } else {
+                    updateUIWithData({ completedWorkouts: [], todoList: [] });
+                }
+            });
+
+            // Load goal
+            const goalDocRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/userProfile/goals`);
+            onSnapshot(goalDocRef, (doc) => {
+                const goal = doc.exists() ? doc.data().goal : null;
+                document.getElementById('goal-display').textContent = goal || "No long-term goal set yet.";
+            });
+
+        }
+        
+        window.changeMonth = (direction) => {
+            selectedDate.setMonth(selectedDate.getMonth() + direction);
+            setupCalendar();
+        };
+
+        // Set up a timer to check for the shloka popup
+        function setupShlokaTimer() {
+            setInterval(async () => {
+                const now = new Date();
+                // Check if it's the right time and the popup hasn't been shown today
+                if (now.getHours() === 22 && now.getMinutes() === 45) {
+                    const dateStr = now.toISOString().split('T')[0];
+                    const docRef = doc(db, `/artifacts/${typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'}/users/${userId}/dailyData`, dateStr);
+                    const docSnap = await getDoc(docRef);
+                    const data = docSnap.exists() ? docSnap.data() : {};
+                    if (!data.shlokaShown) {
+                        showShlokaPopup();
+                    }
+                }
+            }, 60000); // Check every minute
+        }
+
+        function displayDailyQuote() {
+            const today = new Date();
+            const startOfYear = new Date(today.getFullYear(), 0, 0);
+            const diff = today - startOfYear;
+            const oneDay = 1000 * 60 * 60 * 24;
+            const dayOfYear = Math.floor(diff / oneDay);
+            const quoteIndex = dayOfYear % bhagavadGitaQuotes.length;
+            const quote = bhagavadGitaQuotes[quoteIndex];
+            dailyShloka = quote; // Set the daily shloka for the popup
+
+            const quoteEl = document.getElementById('daily-gita-quote');
+            if(quoteEl) {
+                quoteEl.innerHTML = `
+                    <p class="text-lg italic text-gray-800 mb-4">"${quote.text}"</p>
+                    <p class="text-sm text-gray-600">"${quote.meaning}"</p>
+                    <p class="text-xs text-right text-gray-400 mt-2">— ${quote.source}</p>
+                `;
+            }
+        }
+
+        async function initFirebaseAndAuth() {
+            const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            
+            const authStatePromise = new Promise(resolve => {
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                    } else {
+                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                        document.getElementById('user-id-display').textContent = `User ID: ${userId}`;
+                        if (typeof __initial_auth_token !== 'undefined') {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    }
+                    if (userId) {
+                        await loadDataForSelectedDate();
+                        await fetchChartData(56); // 8 weeks
+                        setupCalendar();
+                        setupShlokaTimer();
+                    }
+                    resolve();
+                });
+            });
+            await authStatePromise;
+            displayDailyQuote();
+        }
+
+        document.addEventListener('DOMContentLoaded', initFirebaseAndAuth);
+    </script>
+    <!-- Chosen Palette: Earthy Slate (Dominant: Slate-800, Accents: Green-600, Beige, White, Gray-400) -->
+    <!-- Application Structure Plan: A two-column dashboard with a daily-focused left panel and a progress-oriented right panel. The left panel features the calendar for navigation, today's workout plan (dynamic from JS), and a dynamic to-do list. The right panel displays analytical charts for running, strength, and to-do progress over time. This structure facilitates a clear workflow: manage today's tasks on the left, and check long-term progress on the right, providing both immediate and long-term motivation. -->
+    <!-- Visualization & Content Choices: Daily Plan (Report Info) -> Inform/Organize (Goal) -> Dynamic checklist generated from JS data. Daily To-Dos (User Input) -> Organize/Inform (Goal) -> Dynamic, addable list with checkboxes. Calendar (Time/Date) -> Organize/Change (Goal) -> Dynamic calendar grid with date highlighting and navigation (HTML/CSS/JS). Progress Tracking (Past Data) -> Change/Inform (Goal) -> Line and Bar charts (Chart.js/Canvas) to show weekly trends, making abstract progress concrete and motivating. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #F5F5F3;
+        }
+        .chart-container {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+            height: 300px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        @media (min-width: 768px) {
+            .chart-container {
+                height: 350px;
+            }
+        }
+        .form-checkbox {
+            appearance: none;
+            width: 1.25rem;
+            height: 1.25rem;
+            border-radius: 0.25rem;
+            border-width: 1px;
+            border-color: #CBD5E0;
+            background-color: #EDF2F7;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .form-checkbox:checked {
+            background-color: #38A169;
+            border-color: #38A169;
+        }
+        .form-checkbox:checked::after {
+            content: '✓';
+            color: white;
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+        .shloka-popup {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.75);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body class="text-gray-800">
+    <div class="min-h-screen p-4 md:p-8 bg-gray-100">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl md:text-5xl font-bold text-slate-800">The Warrior's Path</h1>
+            <p class="text-lg text-slate-600 mt-2">Daily Discipline. Long-Term Glory.</p>
+        </header>
+
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Daily Planner Section -->
+            <section class="lg:col-span-1 p-6 bg-white rounded-lg shadow-md h-full flex flex-col">
+                <div class="mb-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <button onclick="changeMonth(-1)" class="p-2 rounded-full hover:bg-slate-200">
+                            <span class="text-xl">←</span>
+                        </button>
+                        <h2 id="current-date" class="text-xl font-semibold"></h2>
+                        <button onclick="changeMonth(1)" class="p-2 rounded-full hover:bg-slate-200">
+                            <span class="text-xl">→</span>
+                        </button>
+                    </div>
+                    <div id="calendar-days" class="grid grid-cols-7 text-sm gap-2 text-center font-medium">
+                        <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+                    </div>
+                </div>
+
+                <div class="flex-grow mb-6">
+                    <h2 class="text-2xl font-bold text-center text-slate-700 mb-4">Today's Mission</h2>
+                    <div class="p-4 bg-slate-50 rounded-lg shadow-inner mb-4">
+                         <!-- Long Term Goal -->
+                        <div class="mb-4">
+                            <h3 class="text-xl font-semibold mb-2">My Long-Term Goal</h3>
+                            <p id="goal-display" class="text-lg text-gray-600 mb-2"></p>
+                            <div class="flex space-x-2">
+                                <input id="goal-input" type="text" placeholder="Set a new goal..." class="flex-grow p-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-green-500 focus:border-green-500">
+                                <button onclick="setLongTermGoal()" class="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition">Set Goal</button>
+                            </div>
+                        </div>
+                        <div id="today-workout-plan" class="mb-4"></div>
+                        <!-- Manual run input with time -->
+                        <div class="flex items-center space-x-2 mt-4">
+                            <input id="manual-run-input" type="number" step="0.1" placeholder="Distance (km)" class="w-1/2 p-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-green-500 focus:border-green-500">
+                            <input id="manual-time-input" type="number" placeholder="Time (min)" class="w-1/2 p-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-green-500 focus:border-green-500">
+                            <button onclick="addManualRun()" class="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition">Add Run</button>
+                            <button onclick="deleteLastRun()" class="bg-red-500 text-white font-bold py-2 px-4 rounded-lg hover:bg-red-600 transition">Delete Run</button>
+                        </div>
+                    </div>
+                    <div class="p-4 bg-slate-50 rounded-lg shadow-inner">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="text-xl font-semibold">My To-Do List</h3>
+                            <span class="text-sm font-semibold text-gray-500">Streak: <span id="streak-counter">0 days</span></span>
+                        </div>
+                        <ul id="today-todo-list" class="space-y-2 mb-4"></ul>
+                        <div class="flex space-x-2">
+                            <input id="new-todo-input" type="text" placeholder="Add a new task..." class="flex-grow p-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-green-500 focus:border-green-500">
+                            <button onclick="addTodoItem()" class="bg-green-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-green-700 transition">Add</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="user-id-display" class="text-xs text-center text-gray-400 mt-auto"></div>
+            </section>
+            
+            <!-- Progress Analysis Section -->
+            <section class="lg:col-span-2 p-6 bg-white rounded-lg shadow-md flex flex-col">
+                <h2 class="text-2xl font-bold text-center text-slate-700 mb-4">Progress Analysis</h2>
+                <p class="text-center text-slate-600 mb-6">Track your weekly progress and visualize your growth over time.</p>
+                <div class="flex-grow space-y-8">
+                    <div>
+                        <h3 class="text-xl font-semibold text-center mb-4">Endurance Running</h3>
+                        <div class="chart-container">
+                            <canvas id="runningChart"></canvas>
+                        </div>
+                    </div>
+                    <div>
+                        <h3 class="text-xl font-semibold text-center mb-4">To-Do Tasks</h3>
+                        <div class="chart-container">
+                            <canvas id="todoChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+        
+        <!-- Daily Inspiration Section -->
+        <section class="mt-8">
+            <h2 class="text-2xl font-bold text-center text-slate-700 mb-4">Daily Inspiration</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Quote 1: Dynamic Bhagavad Gita Verse -->
+                <div id="daily-gita-quote" class="bg-white p-6 rounded-lg shadow-md hover:shadow-xl transition-shadow duration-300">
+                    <!-- This content will be populated by JavaScript -->
+                </div>
+                <!-- Quote 2: General Motivation -->
+                <div class="bg-white p-6 rounded-lg shadow-md hover:shadow-xl transition-shadow duration-300">
+                    <p class="text-lg italic text-gray-800 mb-4">"Discipline is the bridge between goals and accomplishment."</p>
+                    <p class="text-sm text-gray-600">The journey of a thousand miles begins with a single step. Stay consistent, and the results will follow.</p>
+                    <p class="text-xs text-right text-gray-400 mt-2">— Jim Rohn</p>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <!-- Shloka Pop-up Modal -->
+    <div id="shloka-popup" class="shloka-popup hidden">
+        <div class="bg-white p-8 rounded-lg shadow-2xl max-w-lg text-center">
+            <h3 class="text-2xl font-bold text-slate-800 mb-4">Daily Wisdom</h3>
+            <p id="shloka-text" class="text-xl font-medium text-indigo-700 italic mb-4"></p>
+            <p id="shloka-meaning" class="text-gray-700 mb-4"></p>
+            <p id="shloka-source" class="text-sm text-gray-500 mb-6"></p>
+            <button onclick="closeShlokaPopup()" class="bg-indigo-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-indigo-700 transition">Close</button>
+        </div>
+    </div>
+</body>
+</html>
