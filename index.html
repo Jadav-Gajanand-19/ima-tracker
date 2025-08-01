@@ -188,7 +188,7 @@
 </body>
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     let app;
@@ -196,7 +196,9 @@
     let auth;
     let userId = null;
     let selectedDate = new Date();
-    let currentData = {}; // Cache data for the selected date
+    let dailyDataCache = {};
+    let runningChart, todoChart;
+    const daysToFetch = 56;
 
     // Array of Bhagavad Gita verses relevant to discipline, duty, and courage
     const bhagavadGitaQuotes = [
@@ -247,36 +249,52 @@
         todoCompleted: '#4A5568'
     };
 
-    let runningChart, todoChart;
-
     function getWorkoutTasks(date) {
         const dayName = date.toLocaleDateString('en-US', { weekday: 'long' });
         return workoutPlanTemplate[dayName] || { tasks: [] };
     }
 
     // New function to update the UI from a snapshot
-    function updateUI(data) {
-        if (!data) return;
-        currentData = data;
+    function updateUI() {
+        if (!userId) return;
+        
+        const dateStr = selectedDate.toISOString().split('T')[0];
+        const currentData = dailyDataCache[dateStr] || {};
+        
         const todayWorkoutEl = document.getElementById('today-workout-plan');
         const todayTodoEl = document.getElementById('today-todo-list');
-        const streakCounterEl = document.getElementById('streak-counter');
         const plan = getWorkoutTasks(selectedDate);
         
         // --- Workout Plan Rendering ---
         if (todayWorkoutEl) {
+            let workoutTasksHtml = plan.tasks.map((task, index) => {
+                const isCompleted = currentData?.completedWorkouts?.includes(task) || false;
+                return `
+                    <li class="flex items-center space-x-2">
+                        <input type="checkbox" id="workout-task-${index}" class="form-checkbox h-5 w-5 text-green-600 rounded" ${isCompleted ? 'checked' : ''} onchange="updateWorkoutStatus('${task}', this.checked)">
+                        <label for="workout-task-${index}" class="${isCompleted ? 'line-through text-gray-500' : 'text-gray-800'}">${task}</label>
+                    </li>
+                `;
+            }).join('');
+            
+            // Add manual run data to the display
+            if (currentData.runDistanceInKm || currentData.runTimeInMinutes) {
+                const runTask = `${currentData.runDistanceInKm || '0'}km run`;
+                const runTime = currentData.runTimeInMinutes ? `(${currentData.runTimeInMinutes} min)` : '';
+                const isCompleted = currentData?.completedWorkouts?.includes(runTask) || false;
+                
+                workoutTasksHtml += `
+                    <li class="flex items-center space-x-2">
+                        <input type="checkbox" id="workout-task-run" class="form-checkbox h-5 w-5 text-green-600 rounded" ${isCompleted ? 'checked' : ''} onchange="updateWorkoutStatus('${runTask}', this.checked)">
+                        <label for="workout-task-run" class="${isCompleted ? 'line-through text-gray-500' : 'text-gray-800'}">${runTask} ${runTime}</label>
+                    </li>
+                `;
+            }
+
             todayWorkoutEl.innerHTML = `
                 <h3 class="text-xl font-semibold mb-2">${plan.title}</h3>
                 <ul class="space-y-2">
-                    ${(plan.tasks || []).map((task, index) => {
-                        const isCompleted = data?.completedWorkouts?.includes(task) || false;
-                        return `
-                            <li class="flex items-center space-x-2">
-                                <input type="checkbox" id="workout-task-${index}" class="form-checkbox h-5 w-5 text-green-600 rounded" ${isCompleted ? 'checked' : ''} onchange="updateWorkoutStatus('${task}', this.checked)">
-                                <label for="workout-task-${index}" class="${isCompleted ? 'line-through text-gray-500' : 'text-gray-800'}">${task}</label>
-                            </li>
-                        `;
-                    }).join('')}
+                    ${workoutTasksHtml}
                 </ul>
             `;
         }
@@ -284,7 +302,7 @@
         // --- To-Do List Rendering ---
         if (todayTodoEl) {
             todayTodoEl.innerHTML = `
-                ${(data?.todoList || []).map((todo, index) => {
+                ${(currentData?.todoList || []).map((todo, index) => {
                     const isCompleted = todo.completed || false;
                     return `
                         <li class="flex items-center justify-between space-x-2">
@@ -304,14 +322,141 @@
         }
     }
 
+    // Function to draw or update the charts
+    function updateCharts() {
+        if (!userId) return;
+        const today = new Date();
+        const dateFrom = new Date(today.getTime() - (daysToFetch * 24 * 60 * 60 * 1000));
+
+        const runningTotals = {};
+        const runningTimeTotals = {};
+        const totalTodoTotals = {};
+        const completedTodoTotals = {};
+        
+        Object.keys(dailyDataCache).forEach(dateStr => {
+            const docDate = new Date(dateStr);
+            if (docDate >= dateFrom) {
+                const week = Math.floor((docDate.getTime() - dateFrom.getTime()) / (7 * 24 * 60 * 60 * 1000));
+                const weekKey = `Week ${week + 1}`;
+                const dailyData = dailyDataCache[dateStr];
+
+                if (!runningTotals[weekKey]) runningTotals[weekKey] = 0;
+                if (!runningTimeTotals[weekKey]) runningTimeTotals[weekKey] = 0;
+                if (!totalTodoTotals[weekKey]) totalTodoTotals[weekKey] = 0;
+                if (!completedTodoTotals[weekKey]) completedTodoTotals[weekKey] = 0;
+
+                if (dailyData.runDistanceInKm) {
+                    runningTotals[weekKey] += dailyData.runDistanceInKm;
+                }
+                if (dailyData.runTimeInMinutes) {
+                    runningTimeTotals[weekKey] += dailyData.runTimeInMinutes;
+                }
+                if(dailyData.todoList) {
+                    totalTodoTotals[weekKey] += dailyData.todoList.length;
+                    const completedTodos = dailyData.todoList.filter(todo => todo.completed).length;
+                    completedTodoTotals[weekKey] += completedTodos;
+                }
+            }
+        });
+
+        const weeks = Array.from({ length: daysToFetch / 7 }, (_, i) => `Week ${i + 1}`);
+        const runningData = weeks.map(week => runningTotals[week] || 0);
+        const runningTimeData = weeks.map(week => runningTimeTotals[week] || 0);
+        const totalTodoData = weeks.map(week => totalTodoTotals[week] || 0);
+        const completedTodoData = weeks.map(week => completedTodoTotals[week] || 0);
+
+        // Destroy existing charts before creating new ones
+        if (runningChart) runningChart.destroy();
+        const runningChartEl = document.getElementById('runningChart');
+        if (runningChartEl) {
+            runningChart = new Chart(runningChartEl.getContext('2d'), {
+                type: 'line',
+                data: {
+                    labels: weeks,
+                    datasets: [
+                        {
+                            label: 'Total Distance (km)',
+                            data: runningData,
+                            borderColor: chartColors.running,
+                            backgroundColor: 'rgba(90, 103, 216, 0.2)',
+                            fill: false, tension: 0.4
+                        },
+                        {
+                            label: 'Total Time (min)',
+                            data: runningTimeData,
+                            borderColor: chartColors.runningTime,
+                            backgroundColor: 'rgba(246, 173, 85, 0.2)',
+                            fill: false, tension: 0.4,
+                            yAxisID: 'y1'
+                        }
+                    ]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false, 
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    scales: { 
+                        y: { 
+                            beginAtZero: true, 
+                            title: { display: true, text: 'Distance (km)' },
+                            position: 'left'
+                        },
+                        y1: {
+                            beginAtZero: true,
+                            title: { display: true, text: 'Time (min)' },
+                            position: 'right',
+                            grid: {
+                                drawOnChartArea: false
+                            }
+                        }
+                    } 
+                }
+            });
+        }
+
+        if (todoChart) todoChart.destroy();
+        const todoChartEl = document.getElementById('todoChart');
+        if (todoChartEl) {
+            todoChart = new Chart(todoChartEl.getContext('2d'), {
+                type: 'bar',
+                data: {
+                    labels: weeks,
+                    datasets: [{
+                        label: 'Total To-Do Tasks',
+                        data: totalTodoData,
+                        backgroundColor: chartColors.todo
+                    },
+                    {
+                        label: 'Completed To-Do Tasks',
+                        data: completedTodoData,
+                        backgroundColor: chartColors.todoCompleted
+                    }]
+                },
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false, 
+                    scales: { 
+                        x: { stacked: true },
+                        y: { 
+                            stacked: true, 
+                            beginAtZero: true, 
+                            title: { display: true, text: 'Tasks' } 
+                        } 
+                    } 
+                } 
+            });
+        }
+    }
+    
     async function saveData(date, data) {
         if (!userId) return;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const docRef = doc(db, `/artifacts/${appId}/users/${userId}/dailyData`, date);
         try {
             await setDoc(docRef, data, { merge: true });
-            // Check for streak completion after any data save
-            await checkAndIncrementStreak();
         } catch (error) {
             console.error("Error writing document: ", error);
         }
@@ -320,6 +465,7 @@
     window.updateWorkoutStatus = async function(task, isCompleted) {
         if (!userId) return;
         const dateStr = selectedDate.toISOString().split('T')[0];
+        let currentData = dailyDataCache[dateStr] || {};
         let completedWorkouts = currentData.completedWorkouts || [];
 
         if (isCompleted) {
@@ -335,13 +481,13 @@
     window.updateTodoStatus = async function(todoId, isCompleted) {
         if (!userId) return;
         const dateStr = selectedDate.toISOString().split('T')[0];
+        let currentData = dailyDataCache[dateStr] || {};
         let todoList = currentData.todoList || [];
         const todoIndex = todoList.findIndex(todo => todo.id === todoId);
         if (todoIndex > -1) {
             todoList[todoIndex].completed = isCompleted;
             await saveData(dateStr, { todoList: todoList });
         }
-        await fetchChartData(56);
     };
 
     window.addTodoItem = async function() {
@@ -350,21 +496,21 @@
         if (!todoText || !userId) return;
 
         const dateStr = selectedDate.toISOString().split('T')[0];
+        let currentData = dailyDataCache[dateStr] || {};
         let todoList = currentData.todoList || [];
         
         todoList.push({ id: crypto.randomUUID(), text: todoText, completed: false });
         await saveData(dateStr, { todoList: todoList });
         if (todoInput) todoInput.value = '';
-        await fetchChartData(56);
     };
 
     window.deleteTodoItem = async function(todoId) {
         if (!userId) return;
         const dateStr = selectedDate.toISOString().split('T')[0];
+        let currentData = dailyDataCache[dateStr] || {};
         let todoList = currentData.todoList || [];
         todoList = todoList.filter(todo => todo.id !== todoId);
         await saveData(dateStr, { todoList: todoList });
-        await fetchChartData(56);
     };
 
     window.addManualRun = async function() {
@@ -380,12 +526,16 @@
         }
 
         const dateStr = selectedDate.toISOString().split('T')[0];
+        const runTask = `${runDistance || 0}km run`;
+        
+        let currentData = dailyDataCache[dateStr] || {};
         let completedWorkouts = currentData.completedWorkouts || [];
         
-        completedWorkouts = completedWorkouts.filter(task => !task.includes('km jogging'));
-        const newRunTask = `${runDistance || 0}km jogging`;
-        completedWorkouts.push(newRunTask);
-        
+        // Remove old manual run task if it exists
+        completedWorkouts = completedWorkouts.filter(task => !task.includes('km run'));
+        // Add new manual run task and mark it as completed
+        completedWorkouts.push(runTask);
+
         const newRunData = {
             completedWorkouts: completedWorkouts,
             runDistanceInKm: runDistance || 0,
@@ -395,14 +545,15 @@
         await saveData(dateStr, newRunData);
         if (runInput) runInput.value = '';
         if (timeInput) timeInput.value = '';
-        await fetchChartData(56);
     };
 
     window.deleteLastRun = async function() {
         if (!userId) return;
         const dateStr = selectedDate.toISOString().split('T')[0];
+        let currentData = dailyDataCache[dateStr] || {};
         let completedWorkouts = currentData.completedWorkouts || [];
-        completedWorkouts = completedWorkouts.filter(task => !task.includes('km jogging'));
+        
+        completedWorkouts = completedWorkouts.filter(task => !task.includes('km run'));
         
         const newData = {
             completedWorkouts: completedWorkouts,
@@ -410,7 +561,6 @@
             runTimeInMinutes: 0
         };
         await saveData(dateStr, newData);
-        await fetchChartData(56);
     };
 
     window.setLongTermGoal = async function() {
@@ -425,156 +575,18 @@
         if (goalInput) goalInput.value = '';
     };
 
-    async function fetchChartData(daysToFetch) {
-        if (!userId || !db) return;
-        const today = new Date();
-        const dateFrom = new Date(today.getTime() - (daysToFetch * 24 * 60 * 60 * 1000));
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const dailyCollectionRef = collection(db, `/artifacts/${appId}/users/${userId}/dailyData`);
-        
-        const q = query(dailyCollectionRef);
-        try {
-            const querySnapshot = await getDocs(q);
-
-            const runningTotals = {};
-            const runningTimeTotals = {};
-            const totalTodoTotals = {};
-            const completedTodoTotals = {};
-            
-            querySnapshot.forEach(doc => {
-                const docDate = new Date(doc.id);
-                if (docDate >= dateFrom) {
-                    const week = Math.floor((docDate.getTime() - dateFrom.getTime()) / (7 * 24 * 60 * 60 * 1000));
-                    const weekKey = `Week ${week + 1}`;
-                    const dailyData = doc.data();
-
-                    if (!runningTotals[weekKey]) runningTotals[weekKey] = 0;
-                    if (!runningTimeTotals[weekKey]) runningTimeTotals[weekKey] = 0;
-                    if (!totalTodoTotals[weekKey]) totalTodoTotals[weekKey] = 0;
-                    if (!completedTodoTotals[weekKey]) completedTodoTotals[weekKey] = 0;
-
-                    if (dailyData.runDistanceInKm) {
-                        runningTotals[weekKey] += dailyData.runDistanceInKm;
-                    }
-                    if (dailyData.runTimeInMinutes) {
-                        runningTimeTotals[weekKey] += dailyData.runTimeInMinutes;
-                    }
-                    if(dailyData.todoList) {
-                        totalTodoTotals[weekKey] += dailyData.todoList.length;
-                        const completedTodos = dailyData.todoList.filter(todo => todo.completed).length;
-                        completedTodoTotals[weekKey] += completedTodos;
-                    }
-                }
-            });
-
-            const weeks = Array.from({ length: daysToFetch / 7 }, (_, i) => `Week ${i + 1}`);
-            const runningData = weeks.map(week => runningTotals[week] || 0);
-            const runningTimeData = weeks.map(week => runningTimeTotals[week] || 0);
-            const totalTodoData = weeks.map(week => totalTodoTotals[week] || 0);
-            const completedTodoData = weeks.map(week => completedTodoTotals[week] || 0);
-
-            // Destroy existing charts before creating new ones
-            if (runningChart) runningChart.destroy();
-            const runningChartEl = document.getElementById('runningChart');
-            if (runningChartEl) {
-                runningChart = new Chart(runningChartEl.getContext('2d'), {
-                    type: 'line',
-                    data: {
-                        labels: weeks,
-                        datasets: [
-                            {
-                                label: 'Total Distance (km)',
-                                data: runningData,
-                                borderColor: chartColors.running,
-                                backgroundColor: 'rgba(90, 103, 216, 0.2)',
-                                fill: false, tension: 0.4
-                            },
-                            {
-                                label: 'Total Time (min)',
-                                data: runningTimeData,
-                                borderColor: chartColors.runningTime,
-                                backgroundColor: 'rgba(246, 173, 85, 0.2)',
-                                fill: false, tension: 0.4,
-                                yAxisID: 'y1'
-                            }
-                        ]
-                    },
-                    options: { 
-                        responsive: true, 
-                        maintainAspectRatio: false, 
-                        interaction: {
-                            mode: 'index',
-                            intersect: false,
-                        },
-                        scales: { 
-                            y: { 
-                                beginAtZero: true, 
-                                title: { display: true, text: 'Distance (km)' },
-                                position: 'left'
-                            },
-                            y1: {
-                                beginAtZero: true,
-                                title: { display: true, text: 'Time (min)' },
-                                position: 'right',
-                                grid: {
-                                    drawOnChartArea: false
-                                }
-                            }
-                        } 
-                    }
-                });
-            }
-
-            if (todoChart) todoChart.destroy();
-            const todoChartEl = document.getElementById('todoChart');
-            if (todoChartEl) {
-                todoChart = new Chart(todoChartEl.getContext('2d'), {
-                    type: 'bar',
-                    data: {
-                        labels: weeks,
-                        datasets: [{
-                            label: 'Total To-Do Tasks',
-                            data: totalTodoData,
-                            backgroundColor: chartColors.todo
-                        },
-                        {
-                            label: 'Completed To-Do Tasks',
-                            data: completedTodoData,
-                            backgroundColor: chartColors.todoCompleted
-                        }]
-                    },
-                    options: { 
-                        responsive: true, 
-                        maintainAspectRatio: false, 
-                        scales: { 
-                            x: { stacked: true },
-                            y: { 
-                                stacked: true, 
-                                beginAtZero: true, 
-                                title: { display: true, text: 'Tasks' } 
-                            } 
-                        } 
-                    } 
-                });
-            }
-        } catch (error) {
-            console.error("Error fetching chart data:", error);
-        }
-    }
-
     async function checkAndIncrementStreak() {
         if (!userId) return;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const dateStr = selectedDate.toISOString().split('T')[0];
-        const dailyDocRef = doc(db, `/artifacts/${appId}/users/${userId}/dailyData`, dateStr);
-        const dailyDocSnap = await getDoc(dailyDocRef);
-        const dailyData = dailyDocSnap.exists() ? dailyDocSnap.data() : { completedWorkouts: [], todoList: [] };
+        const dateStr = new Date().toISOString().split('T')[0];
+        const dailyData = dailyDataCache[dateStr] || { completedWorkouts: [], todoList: [] };
 
-        const allWorkouts = getWorkoutTasks(selectedDate).tasks;
+        const allWorkouts = getWorkoutTasks(new Date()).tasks;
         const workoutsCompleted = allWorkouts.every(task => dailyData.completedWorkouts?.includes(task));
         const allTodosCompleted = dailyData.todoList?.every(todo => todo.completed) || dailyData.todoList?.length === 0;
 
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const streakDocRef = doc(db, `/artifacts/${appId}/users/${userId}/userProfile/streak`);
+        
         const streakDocSnap = await getDoc(streakDocRef);
         let streakData = streakDocSnap.exists() ? streakDocSnap.data() : { currentStreak: 0, lastCompletionDate: null };
         
@@ -596,45 +608,8 @@
                 await setDoc(streakDocRef, { currentStreak: newStreak, lastCompletionDate: todayStr });
             }
         }
-        await updateStreakDisplay();
     }
 
-    async function updateStreakDisplay() {
-        if (!userId) return;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const streakDocRef = doc(db, `/artifacts/${appId}/users/${userId}/userProfile/streak`);
-        const streakDocSnap = await getDoc(streakDocRef);
-        const streakData = streakDocSnap.exists() ? streakDocSnap.data() : { currentStreak: 0 };
-        const streakCounterEl = document.getElementById('streak-counter');
-        if (streakCounterEl) {
-            streakCounterEl.textContent = `${streakData.currentStreak || 0} days`;
-        }
-    }
-
-    function showShlokaPopup() {
-        const popup = document.getElementById('shloka-popup');
-        const popupText = document.getElementById('shloka-text');
-        const popupMeaning = document.getElementById('shloka-meaning');
-        const popupSource = document.getElementById('shloka-source');
-        if (popup && popupText && popupMeaning && popupSource) {
-            popupText.textContent = dailyShloka.text;
-            popupMeaning.textContent = dailyShloka.meaning;
-            popupSource.textContent = dailyShloka.source;
-            popup.classList.remove('hidden');
-        }
-    }
-
-    window.closeShlokaPopup = async function() {
-        const popup = document.getElementById('shloka-popup');
-        if (popup) {
-            popup.classList.add('hidden');
-        }
-        const dateStr = new Date().toISOString().split('T')[0];
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const docRef = doc(db, `/artifacts/${appId}/users/${userId}/dailyData`, dateStr);
-        await setDoc(docRef, { shlokaShown: true }, { merge: true });
-    };
-    
     function setupCalendar() {
         const calendarEl = document.getElementById('calendar-days');
         const dateHeaderEl = document.getElementById('current-date');
@@ -645,7 +620,9 @@
         const endOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0);
         dateHeaderEl.textContent = selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
         
-        calendarEl.innerHTML = '';
+        calendarEl.innerHTML = `
+            <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+        `;
         const firstDayOfWeek = startOfMonth.getDay();
         const daysInMonth = endOfMonth.getDate();
 
@@ -669,60 +646,54 @@
             dayEl.addEventListener('click', () => {
                 selectedDate = currentDay;
                 setupCalendar();
-                loadDataForSelectedDate();
+                updateUI();
             });
             calendarEl.appendChild(dayEl);
         }
     }
     
-    function loadDataForSelectedDate() {
-        if (!userId || !db) return;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const dateStr = selectedDate.toISOString().split('T')[0];
-        const docRef = doc(db, `/artifacts/${appId}/users/${userId}/dailyData`, dateStr);
-        
-        onSnapshot(docRef, (doc) => {
-            if (doc.exists()) {
-                updateUI(doc.data());
-            } else {
-                updateUI({ completedWorkouts: [], todoList: [] });
-            }
-        });
-
-        const goalDocRef = doc(db, `/artifacts/${appId}/users/${userId}/userProfile/goals`);
-        onSnapshot(goalDocRef, (doc) => {
-            const goal = doc.exists() ? doc.data().goal : null;
-            const goalDisplayEl = document.getElementById('goal-display');
-            if (goalDisplayEl) {
-                goalDisplayEl.textContent = goal || "No long-term goal set yet.";
-            }
-        });
-    }
-    
     window.changeMonth = (direction) => {
         selectedDate.setMonth(selectedDate.getMonth() + direction);
         setupCalendar();
-        loadDataForSelectedDate();
+        updateUI();
     };
 
     function setupShlokaTimer() {
-        // Run once on load, then set up the interval for daily check
         checkShlokaPopup();
         setInterval(checkShlokaPopup, 60000);
     }
     
     async function checkShlokaPopup() {
-        if (!userId || !db) return;
+        if (!userId) return;
         const now = new Date();
         const dateStr = now.toISOString().split('T')[0];
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const docRef = doc(db, `/artifacts/${appId}/users/${userId}/dailyData`, dateStr);
-        const docSnap = await getDoc(docRef);
-        const data = docSnap.exists() ? docSnap.data() : {};
-        if (!data.shlokaShown) {
+        const dailyData = dailyDataCache[dateStr] || {};
+        if (!dailyData.shlokaShown) {
             showShlokaPopup();
         }
     }
+
+    function showShlokaPopup() {
+        const popup = document.getElementById('shloka-popup');
+        const popupText = document.getElementById('shloka-text');
+        const popupMeaning = document.getElementById('shloka-meaning');
+        const popupSource = document.getElementById('shloka-source');
+        if (popup && popupText && popupMeaning && popupSource) {
+            popupText.textContent = dailyShloka.text;
+            popupMeaning.textContent = dailyShloka.meaning;
+            popupSource.textContent = dailyShloka.source;
+            popup.classList.remove('hidden');
+        }
+    }
+
+    window.closeShlokaPopup = async function() {
+        const popup = document.getElementById('shloka-popup');
+        if (popup) {
+            popup.classList.add('hidden');
+        }
+        const dateStr = new Date().toISOString().split('T')[0];
+        await saveData(dateStr, { shlokaShown: true });
+    };
 
     function displayDailyQuote() {
         const today = new Date();
@@ -745,45 +716,71 @@
     }
 
     async function init() {
-        // Initialize Firebase and Authentication
-        // This is a dummy config for a live deployment where the Canvas variables are not present.
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-            apiKey: "YOUR_API_KEY",
-            authDomain: "YOUR_AUTH_DOMAIN",
-            projectId: "YOUR_PROJECT_ID",
-            storageBucket: "YOUR_STORAGE_BUCKET",
-            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
-            appId: "YOUR_APP_ID"
+            apiKey: "YOUR_API_KEY", authDomain: "YOUR_AUTH_DOMAIN", projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET", messagingSenderId: "YOUR_MESSAGING_SENDER_ID", appId: "YOUR_APP_ID"
         };
         app = initializeApp(firebaseConfig);
         db = getFirestore(app);
         auth = getAuth(app);
 
-        // Sign in anonymously to get a userId immediately
-        try {
-            await signInAnonymously(auth);
-            userId = auth.currentUser.uid;
-        } catch (error) {
-            console.error("Anonymous authentication failed, using a random user ID.", error);
-            userId = crypto.randomUUID();
-        }
-        
-        const userIdDisplay = document.getElementById('user-id-display');
-        if (userIdDisplay) {
-            userIdDisplay.textContent = `User ID: ${userId}`;
-        }
+        // Use onAuthStateChanged to handle authentication state changes, including persistence
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                userId = user.uid;
+            } else {
+                // If no user is found (e.g., first visit), sign in anonymously
+                await signInAnonymously(auth);
+                userId = auth.currentUser.uid;
+            }
 
-        // All subsequent UI and data-related functions are called after auth is ready
-        setupCalendar();
-        loadDataForSelectedDate();
-        fetchChartData(56);
-        updateStreakDisplay();
+            // Once we have a userId, load all initial data and set up real-time listeners
+            if (userId) {
+                const userIdDisplay = document.getElementById('user-id-display');
+                if (userIdDisplay) userIdDisplay.textContent = `User ID: ${userId}`;
+
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const dailyCollectionRef = collection(db, `/artifacts/${appId}/users/${userId}/dailyData`);
+                const goalDocRef = doc(db, `/artifacts/${appId}/users/${userId}/userProfile/goals`);
+                const streakDocRef = doc(db, `/artifacts/${appId}/users/${userId}/userProfile/streak`);
+
+                // Listen for changes to all daily data documents in real-time
+                onSnapshot(dailyCollectionRef, (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        dailyDataCache[change.doc.id] = change.doc.data();
+                    });
+                    updateUI();
+                    updateCharts();
+                    checkAndIncrementStreak(); // Check streak on any data change
+                    setupCalendar();
+                });
+
+                // Listen for changes to the goal document
+                onSnapshot(goalDocRef, (doc) => {
+                    const goal = doc.exists() ? doc.data().goal : null;
+                    const goalDisplayEl = document.getElementById('goal-display');
+                    if (goalDisplayEl) {
+                        goalDisplayEl.textContent = goal || "No long-term goal set yet.";
+                    }
+                });
+
+                // Listen for changes to the streak document
+                onSnapshot(streakDocRef, (doc) => {
+                    const streakData = doc.exists() ? doc.data() : { currentStreak: 0 };
+                    const streakCounterEl = document.getElementById('streak-counter');
+                    if (streakCounterEl) {
+                        streakCounterEl.textContent = `${streakData.currentStreak || 0} days`;
+                    }
+                });
+
+                // Hide loading screen and show main content
+                document.getElementById('loading-screen').classList.add('hidden');
+                document.getElementById('main-content').classList.remove('hidden');
+            }
+        });
+
         setupShlokaTimer();
         displayDailyQuote();
-        
-        // Hide loading screen and show main content
-        document.getElementById('loading-screen').classList.add('hidden');
-        document.getElementById('main-content').classList.remove('hidden');
 
         // Redraw charts on window resize for better responsiveness
         window.addEventListener('resize', () => {
